@@ -9,14 +9,14 @@ function App() {
   const [customVehicles, setCustomVehicles] = useState([])
   const [efficiency, setEfficiency] = useState('')
   const [singleDistance, setSingleDistance] = useState('')
-  const [buffer, setBuffer] = useState(10)
   const [isMultiStop, setIsMultiStop] = useState(false)
+  const [showSkipAnalysis, setShowSkipAnalysis] = useState(false)
+  const [startingBattery, setStartingBattery] = useState(80)
   const [stops, setStops] = useState([
     { id: 1, distance: '', label: 'To first charger' },
     { id: 2, distance: '', label: 'To next charger' },
     { id: 3, distance: '', label: 'To destination' }
   ])
-  const [startingBattery, setStartingBattery] = useState(80)
   
   // Load custom vehicles from localStorage
   useEffect(() => {
@@ -40,13 +40,44 @@ function App() {
   const calculateSingleStop = (distance, efficiencyNum) => {
     const energyNeeded = distance / efficiencyNum
     const percentageNeeded = (energyNeeded / selectedVehicle.capacity) * 100
-    const chargeTarget = percentageNeeded + buffer
     
     return {
       energyNeeded: energyNeeded.toFixed(1),
-      percentageNeeded: percentageNeeded.toFixed(1),
-      chargeTarget: Math.min(chargeTarget, 100).toFixed(1)
+      percentageNeeded: percentageNeeded.toFixed(1)
     }
+  }
+
+  const calculateSkipAnalysis = (validStops, efficiencyNum) => {
+    if (validStops.length < 2) return []
+    
+    const skipOptions = []
+    
+    // For each intermediate stop (not the last one), calculate what efficiency is needed to skip it
+    for (let skipIndex = 0; skipIndex < validStops.length - 1; skipIndex++) {
+      // Calculate combined distance from start through the skipped stop to the next stop
+      let combinedDistance = 0
+      for (let i = 0; i <= skipIndex + 1; i++) {
+        combinedDistance += parseFloat(validStops[i].distance)
+      }
+      
+      // What efficiency do we need to travel this combined distance?
+      // Battery available = starting battery - buffer for safety (assume 10%)
+      const availableBattery = Math.max(startingBattery - 10, 10) // minimum 10% buffer
+      const availableEnergy = (availableBattery / 100) * selectedVehicle.capacity
+      const requiredEfficiency = combinedDistance / availableEnergy
+      
+      const isDoable = requiredEfficiency <= (efficiencyNum + 0.01) // Add small tolerance for floating point precision
+      
+      skipOptions.push({
+        skipStopLabel: validStops[skipIndex].label.replace('To ', ''),
+        combinedDistance,
+        requiredEfficiency: requiredEfficiency.toFixed(1),
+        isDoable,
+        batterySavings: parseFloat(validStops[skipIndex].distance) / efficiencyNum / selectedVehicle.capacity * 100
+      })
+    }
+    
+    return skipOptions
   }
 
   const calculate = () => {
@@ -57,46 +88,56 @@ function App() {
     }
 
     if (isMultiStop) {
-      // Multi-stop calculation
+      // Multi-stop calculation - each leg independent
       const validStops = stops.filter(stop => stop.distance && parseFloat(stop.distance) > 0)
       if (validStops.length === 0) return null
 
-      let currentBattery = startingBattery
       const legs = []
+      let totalDistance = 0
+      let totalPercentageNeeded = 0
+      let totalConservativeNeeded = 0
 
-      validStops.forEach((stop, index) => {
+      validStops.forEach((stop) => {
         const distance = parseFloat(stop.distance)
         
-        // Calculate energy needed for this leg
-        const energyNeeded = distance / efficiencyNum
-        const percentageNeeded = (energyNeeded / selectedVehicle.capacity) * 100
+        // Calculate for current efficiency
+        const main = calculateSingleStop(distance, efficiencyNum)
         
-        // For last leg, just show what's needed
-        // For charging stops, calculate what to charge to for next leg
-        let chargeTarget = null
-        if (index < validStops.length - 1) {
-          // Not the last leg - calculate charge target
-          chargeTarget = Math.min(percentageNeeded + buffer, 100)
+        // Calculate conservative (20% worse efficiency)
+        const conservativeEfficiency = efficiencyNum * 0.8
+        const conservative = {
+          efficiency: conservativeEfficiency.toFixed(1),
+          ...calculateSingleStop(distance, conservativeEfficiency)
         }
-        
-        const batteryAfter = currentBattery - percentageNeeded
         
         legs.push({
           label: stop.label,
           distance,
-          percentageNeeded: percentageNeeded.toFixed(1),
-          batteryAfter: batteryAfter.toFixed(1),
-          chargeTarget: chargeTarget ? chargeTarget.toFixed(1) : null,
-          efficiencyUsed: efficiencyNum.toFixed(1)
+          main: {
+            efficiency: efficiencyNum.toFixed(1),
+            ...main
+          },
+          conservative
         })
 
-        // Update current battery for next iteration (if charging)
-        if (chargeTarget) {
-          currentBattery = chargeTarget
-        }
+        totalDistance += distance
+        totalPercentageNeeded += parseFloat(main.percentageNeeded)
+        totalConservativeNeeded += parseFloat(conservative.percentageNeeded)
       })
 
-      return { isMultiStop: true, legs }
+      // Calculate skip analysis if enabled
+      const skipAnalysis = showSkipAnalysis ? calculateSkipAnalysis(validStops, efficiencyNum) : []
+
+      return { 
+        isMultiStop: true, 
+        legs,
+        summary: {
+          totalDistance,
+          totalPercentageNeeded: totalPercentageNeeded.toFixed(1),
+          totalConservativeNeeded: totalConservativeNeeded.toFixed(1)
+        },
+        skipAnalysis
+      }
     } else {
       // Single stop calculation
       const distanceNum = parseFloat(singleDistance)
@@ -108,25 +149,18 @@ function App() {
       // Calculate for current efficiency
       const main = calculateSingleStop(distanceNum, efficiencyNum)
       
-      // Calculate best case (10% better efficiency)
-      const bestEfficiency = efficiencyNum * 1.1
-      const best = {
-        efficiency: bestEfficiency.toFixed(1),
-        ...calculateSingleStop(distanceNum, bestEfficiency)
-      }
-      
-      // Calculate worst case (10% worse efficiency)
-      const worstEfficiency = efficiencyNum * 0.9
-      const worst = {
-        efficiency: worstEfficiency.toFixed(1),
-        ...calculateSingleStop(distanceNum, worstEfficiency)
+      // Calculate conservative case (20% worse efficiency)
+      const conservativeEfficiency = efficiencyNum * 0.8
+      const conservative = {
+        efficiency: conservativeEfficiency.toFixed(1),
+        ...calculateSingleStop(distanceNum, conservativeEfficiency)
       }
       
       return {
         isMultiStop: false,
+        efficiency: efficiencyNum.toFixed(1),
         ...main,
-        best,
-        worst
+        conservative
       }
     }
   }
@@ -249,27 +283,62 @@ function App() {
         ) : (
           /* Multi-Stop Inputs */
           <div className="mb-4">
-            {/* Starting Battery */}
+            {/* Skip Analysis Toggle */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-4">
-              <div className="bg-green-50 px-4 py-3 rounded-t-lg border-b border-gray-200">
+              <div className="bg-purple-50 px-4 py-3 rounded-t-lg border-b border-gray-200">
                 <label className="flex items-center text-sm font-medium text-gray-700">
-                  <span className="mr-2">🔋</span> Starting Battery Level (%)
+                  <span className="mr-2">🎯</span> Skip Analysis
                 </label>
               </div>
               <div className="p-4">
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  max="100"
-                  placeholder="80"
-                  value={startingBattery}
-                  onChange={(e) => setStartingBattery(parseInt(e.target.value) || 0)}
-                  className="w-full p-3 border border-gray-300 rounded-lg bg-white text-gray-900 text-lg font-semibold
-                           focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-center"
-                />
+                <div className="flex bg-gray-100 rounded-lg p-1">
+                  <button
+                    onClick={() => setShowSkipAnalysis(false)}
+                    className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+                      !showSkipAnalysis 
+                        ? 'bg-white text-purple-600 shadow-sm' 
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    Off
+                  </button>
+                  <button
+                    onClick={() => setShowSkipAnalysis(true)}
+                    className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+                      showSkipAnalysis 
+                        ? 'bg-white text-purple-600 shadow-sm' 
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    On
+                  </button>
+                </div>
               </div>
             </div>
+
+            {/* Starting Battery (only shown when skip analysis is on) */}
+            {showSkipAnalysis && (
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-4">
+                <div className="bg-green-50 px-4 py-3 rounded-t-lg border-b border-gray-200">
+                  <label className="flex items-center text-sm font-medium text-gray-700">
+                    <span className="mr-2">🔋</span> Starting Battery Level (%)
+                  </label>
+                </div>
+                <div className="p-4">
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    max="100"
+                    placeholder="80"
+                    value={startingBattery}
+                    onChange={(e) => setStartingBattery(parseInt(e.target.value) || 0)}
+                    className="w-full p-3 border border-gray-300 rounded-lg bg-white text-gray-900 text-lg font-semibold
+                             focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-center"
+                  />
+                </div>
+              </div>
+            )}
             
             {/* Stop Distance Inputs */}
             {stops.map((stop, index) => (
@@ -299,27 +368,6 @@ function App() {
           </div>
         )}
 
-        {/* Buffer Slider */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
-          <div className="bg-blue-50 px-4 py-3 rounded-t-lg border-b border-gray-200">
-            <label className="flex items-center justify-between text-sm font-medium text-gray-700">
-              <span className="flex items-center"><span className="mr-2">🛡️</span> Safety Buffer</span>
-              <span className="text-blue-600 font-semibold">{buffer}%</span>
-            </label>
-          </div>
-          <div className="p-4">
-            <input
-              type="range"
-              min="0"
-              max="20"
-              step="1"
-              value={buffer}
-              onChange={(e) => setBuffer(parseInt(e.target.value))}
-              className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer 
-                       slider accent-blue-600"
-            />
-          </div>
-        </div>
 
         {/* Results */}
         {result && (
@@ -332,91 +380,124 @@ function App() {
                 </h3>
                 {result.legs.map((leg, index) => (
                   <div key={index} className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                    <div className="flex justify-between items-center mb-2">
+                    <div className="flex justify-between items-center mb-3">
                       <h4 className="text-sm font-medium text-gray-700">{leg.label}</h4>
                       <span className="text-sm text-gray-500">{leg.distance} miles</span>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
-                      <div className="text-center">
-                        <div className="text-lg font-bold text-blue-600">
-                          Need: {leg.percentageNeeded}%
+                      {/* Main Calculation */}
+                      <div className="bg-blue-50 rounded-lg p-3 border border-blue-200">
+                        <div className="text-center">
+                          <div className="text-sm text-blue-600 mb-1">
+                            {leg.main.efficiency} mi/kWh
+                          </div>
+                          <div className="text-lg font-bold text-blue-700">
+                            Need: {leg.main.percentageNeeded}%
+                          </div>
                         </div>
-                        <div className="text-sm text-gray-500">Battery used</div>
                       </div>
-                      <div className="text-center">
-                        {leg.chargeTarget ? (
-                          <>
-                            <div className="text-lg font-bold text-green-600">
-                              Charge to: {leg.chargeTarget}%
-                            </div>
-                            <div className="text-sm text-gray-500">For next leg</div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="text-lg font-bold text-gray-600">
-                              Arrive: {leg.batteryAfter}%
-                            </div>
-                            <div className="text-sm text-gray-500">Final destination</div>
-                          </>
-                        )}
+                      {/* Conservative Calculation */}
+                      <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                        <div className="text-center">
+                          <div className="text-sm text-gray-600 mb-1">
+                            {leg.conservative.efficiency} mi/kWh (-20%)
+                          </div>
+                          <div className="text-lg font-bold text-gray-700">
+                            Need: {leg.conservative.percentageNeeded}%
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
                 ))}
+                
+                {/* Trip Summary */}
+                <div className="bg-blue-50 rounded-lg border-2 border-blue-200 p-4 mt-6">
+                  <h4 className="text-lg font-semibold text-blue-800 text-center mb-3">
+                    Trip Overview
+                  </h4>
+                  <div className="space-y-2 text-center">
+                    <div className="text-sm text-blue-600">
+                      Total Distance: <span className="font-semibold">{result.summary.totalDistance} miles</span>
+                    </div>
+                    <div className="text-sm text-blue-700">
+                      Total Battery Needed: <span className="font-bold">{result.summary.totalPercentageNeeded}%</span>
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      Conservative Total: <span className="font-bold">{result.summary.totalConservativeNeeded}%</span>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Skip Analysis Results */}
+                {result.skipAnalysis && result.skipAnalysis.length > 0 && (
+                  <div className="bg-purple-50 rounded-lg border-2 border-purple-200 p-4 mt-6">
+                    <h4 className="text-lg font-semibold text-purple-800 text-center mb-3">
+                      🎯 Skip Opportunities
+                    </h4>
+                    <div className="space-y-3">
+                      {result.skipAnalysis.map((skip, index) => (
+                        <div key={index} className={`p-3 rounded-lg border ${
+                          skip.isDoable ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'
+                        }`}>
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-sm font-medium text-gray-700">
+                              Skip {skip.skipStopLabel}
+                            </span>
+                            <span className={`text-xs px-2 py-1 rounded-full ${
+                              skip.isDoable 
+                                ? 'bg-green-100 text-green-700' 
+                                : 'bg-gray-100 text-gray-600'
+                            }`}>
+                              {skip.isDoable ? '✅ Doable' : '❌ Too hard'}
+                            </span>
+                          </div>
+                          <div className="text-sm text-gray-600">
+                            Need <span className="font-semibold">{skip.requiredEfficiency} mi/kWh</span>
+                            {skip.isDoable && (
+                              <span className="text-green-600 ml-2">
+                                (vs your {efficiency} mi/kWh)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            {skip.combinedDistance} miles combined distance
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               /* Single Stop Results */
-              <div className="grid grid-cols-3 gap-2">
-                {/* Worst Case */}
-                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                  <div className="text-center">
-                    <div className="text-xl font-bold text-gray-700 mb-1">
-                      {result.worst.efficiency}
-                    </div>
-                    <div className="text-sm text-gray-500 mb-2">
-                      mi/kWh
-                    </div>
-                    <div className="text-2xl font-black text-gray-700 mb-2">
-                      Need: {result.worst.percentageNeeded}%
-                    </div>
-                    <div className="text-lg font-bold text-blue-600">
-                      Charge: {result.worst.chargeTarget}%
-                    </div>
-                  </div>
-                </div>
-
-                {/* Calculated Result */}
+              <div className="grid grid-cols-2 gap-4">
+                {/* Main Calculation */}
                 <div className="bg-blue-50 rounded-lg p-4 border-2 border-blue-200">
                   <div className="text-center">
                     <div className="text-xl font-bold text-blue-700 mb-1">
-                      {efficiency}
+                      {result.efficiency}
                     </div>
-                    <div className="text-sm text-gray-600 mb-2">
+                    <div className="text-sm text-blue-600 mb-2">
                       mi/kWh
                     </div>
-                    <div className="text-2xl font-black text-blue-700 mb-2">
+                    <div className="text-2xl font-black text-blue-700">
                       Need: {result.percentageNeeded}%
-                    </div>
-                    <div className="text-lg font-bold text-blue-600">
-                      Charge: {result.chargeTarget}%
                     </div>
                   </div>
                 </div>
 
-                {/* Best Case */}
+                {/* Conservative Case */}
                 <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                   <div className="text-center">
                     <div className="text-xl font-bold text-gray-700 mb-1">
-                      {result.best.efficiency}
+                      {result.conservative.efficiency}
                     </div>
                     <div className="text-sm text-gray-500 mb-2">
-                      mi/kWh
+                      mi/kWh (-20%)
                     </div>
-                    <div className="text-2xl font-black text-gray-700 mb-2">
-                      Need: {result.best.percentageNeeded}%
-                    </div>
-                    <div className="text-lg font-bold text-blue-600">
-                      Charge: {result.best.chargeTarget}%
+                    <div className="text-2xl font-black text-gray-700">
+                      Need: {result.conservative.percentageNeeded}%
                     </div>
                   </div>
                 </div>
